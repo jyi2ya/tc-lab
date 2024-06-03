@@ -4,6 +4,10 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::thread;
+use std::time;
+
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
 
 fn load_graph() -> (HashSet<(usize, usize)>, HashMap<usize, HashSet<usize>>) {
     let args: Vec<_> = std::env::args().collect();
@@ -73,19 +77,30 @@ fn load_graph() -> (HashSet<(usize, usize)>, HashMap<usize, HashSet<usize>>) {
 }
 
 fn main() {
+    let start_time = time::Instant::now();
     let (edges, graph) = load_graph();
+    let loaded_time = time::Instant::now();
+    println!(
+        "Loading data: {} seconds",
+        (loaded_time - start_time).as_secs_f64()
+    );
 
-    let mut result = 0;
+    let accumulate: usize = edges
+        .par_iter()
+        .map(|(src, dst)| {
+            graph
+                .get(src)
+                .unwrap()
+                .intersection(graph.get(dst).unwrap())
+                .count()
+        })
+        .sum();
+    let end_time = time::Instant::now();
+    println!(
+        "Computation : {} seconds",
+        (end_time - loaded_time).as_secs_f64()
+    );
 
-    for (src, dst) in edges.iter() {
-        let local = graph
-            .get(src)
-            .unwrap()
-            .intersection(graph.get(dst).unwrap())
-            .count();
-        result += local;
-    }
-
-    let result = result / 3;
+    let result = accumulate / 3;
     println!("{result}");
 }
