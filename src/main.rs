@@ -9,7 +9,10 @@ use std::time;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 
-fn load_graph() -> (HashSet<(usize, usize)>, HashMap<usize, HashSet<usize>>) {
+type EdgeSet = HashSet<(usize, usize)>;
+type Graph = HashMap<usize, HashSet<usize>>;
+
+fn load_graph() -> (EdgeSet, Graph) {
     let args: Vec<_> = std::env::args().collect();
     let filename = &args[1];
     let file = File::open(filename).unwrap();
@@ -28,7 +31,7 @@ fn load_graph() -> (HashSet<(usize, usize)>, HashMap<usize, HashSet<usize>>) {
 
     let bridge_thread = thread::spawn(move || {
         while let Ok(line) = reader_rx.recv() {
-            if line.starts_with("#") {
+            if line.starts_with('#') {
                 continue;
             }
 
@@ -50,22 +53,16 @@ fn load_graph() -> (HashSet<(usize, usize)>, HashMap<usize, HashSet<usize>>) {
             let (src, dst) = (src.min(dst), src.max(dst));
             edges.insert((src, dst));
         }
-        return edges;
+        edges
     });
 
     let graph_thread = thread::spawn(move || {
         let mut graph: HashMap<usize, HashSet<usize>> = HashMap::new();
         while let Ok((src, dst)) = graph_rx.recv() {
-            if !graph.contains_key(&src) {
-                graph.insert(src, HashSet::new());
-            }
-            if !graph.contains_key(&dst) {
-                graph.insert(dst, HashSet::new());
-            }
-            graph.get_mut(&src).unwrap().insert(dst);
-            graph.get_mut(&dst).unwrap().insert(src);
+            graph.entry(src).or_default().insert(dst);
+            graph.entry(dst).or_default().insert(src);
         }
-        return graph;
+        graph
     });
 
     reader_thread.join().unwrap();
