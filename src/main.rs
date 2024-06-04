@@ -9,6 +9,31 @@ use std::time;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 
+struct ScopeTimer {
+    label: String,
+    start: time::Instant,
+}
+
+impl ScopeTimer {
+    pub fn with_label(label: impl ToString) -> Self {
+        Self {
+            label: label.to_string(),
+            start: time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for ScopeTimer {
+    fn drop(&mut self) {
+        let end = time::Instant::now();
+        println!(
+            "[ScopeTimer] {} seconds | {}",
+            (end - self.start).as_secs_f64(),
+            self.label,
+        );
+    }
+}
+
 type EdgeSet = HashSet<(usize, usize)>;
 type Graph = HashMap<usize, HashSet<usize>>;
 
@@ -23,6 +48,7 @@ fn load_graph() -> (EdgeSet, Graph) {
     let (graph_tx, graph_rx) = std::sync::mpsc::channel();
 
     let reader_thread = thread::spawn(move || {
+        let _timer = ScopeTimer::with_label("reader thread");
         for line in reader.lines() {
             let line = line.unwrap();
             reader_tx.send(line).unwrap();
@@ -30,6 +56,7 @@ fn load_graph() -> (EdgeSet, Graph) {
     });
 
     let bridge_thread = thread::spawn(move || {
+        let _timer = ScopeTimer::with_label("bridge thread");
         while let Ok(line) = reader_rx.recv() {
             if line.starts_with('#') {
                 continue;
@@ -48,6 +75,7 @@ fn load_graph() -> (EdgeSet, Graph) {
     });
 
     let edge_thread = thread::spawn(move || {
+        let _timer = ScopeTimer::with_label("edge thread");
         let mut edges: HashSet<(usize, usize)> = HashSet::new();
         while let Ok((src, dst)) = edge_rx.recv() {
             let (src, dst) = (src.min(dst), src.max(dst));
@@ -57,6 +85,7 @@ fn load_graph() -> (EdgeSet, Graph) {
     });
 
     let graph_thread = thread::spawn(move || {
+        let _timer = ScopeTimer::with_label("graph thread");
         let mut graph: HashMap<usize, HashSet<usize>> = HashMap::new();
         while let Ok((src, dst)) = graph_rx.recv() {
             graph.entry(src).or_default().insert(dst);
@@ -74,29 +103,28 @@ fn load_graph() -> (EdgeSet, Graph) {
 }
 
 fn main() {
-    let start_time = time::Instant::now();
-    let (edges, graph) = load_graph();
-    let loaded_time = time::Instant::now();
-    println!(
-        "Loading data: {} seconds",
-        (loaded_time - start_time).as_secs_f64()
-    );
+    let _timer = ScopeTimer::with_label("totals");
 
-    let accumulate: usize = edges
-        .par_iter()
-        .map(|(src, dst)| {
-            graph
-                .get(src)
-                .unwrap()
-                .intersection(graph.get(dst).unwrap())
-                .count()
-        })
-        .sum();
-    let end_time = time::Instant::now();
-    println!(
-        "Computation : {} seconds",
-        (end_time - loaded_time).as_secs_f64()
-    );
+    let (edges, graph) = {
+        let _timer = ScopeTimer::with_label("loading data");
+        let (edges, graph) = load_graph();
+        (edges, graph)
+    };
+
+    let accumulate = {
+        let _timer = ScopeTimer::with_label("computation");
+        let result: usize = edges
+            .par_iter()
+            .map(|(src, dst)| {
+                graph
+                    .get(src)
+                    .unwrap()
+                    .intersection(graph.get(dst).unwrap())
+                    .count()
+            })
+            .sum();
+        result
+    };
 
     let result = accumulate / 3;
     println!("{result}");
