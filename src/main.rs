@@ -34,8 +34,9 @@ impl Drop for ScopeTimer {
     }
 }
 
-type EdgeSet = HashSet<(usize, usize)>;
-type Graph = HashMap<usize, HashSet<usize>>;
+type NodeId = u32;
+type EdgeSet = HashSet<(NodeId, NodeId)>;
+type Graph = Vec<HashSet<NodeId>>;
 
 fn load_graph() -> (EdgeSet, Graph) {
     let args: Vec<_> = std::env::args().collect();
@@ -51,13 +52,6 @@ fn load_graph() -> (EdgeSet, Graph) {
         let _timer = ScopeTimer::with_label("reader thread");
         for line in reader.lines() {
             let line = line.unwrap();
-            reader_tx.send(line).unwrap();
-        }
-    });
-
-    let bridge_thread = thread::spawn(move || {
-        let _timer = ScopeTimer::with_label("bridge thread");
-        while let Ok(line) = reader_rx.recv() {
             if line.starts_with('#') {
                 continue;
             }
@@ -69,6 +63,19 @@ fn load_graph() -> (EdgeSet, Graph) {
                 continue;
             }
 
+            reader_tx.send((src, dst)).unwrap();
+        }
+    });
+
+    let bridge_thread = thread::spawn(move || {
+        let _timer = ScopeTimer::with_label("bridge thread");
+        let mut compact: HashMap<usize, NodeId> = HashMap::new();
+        while let Ok((src, dst)) = reader_rx.recv() {
+            let next_index = compact.len() as NodeId;
+            let src = *compact.entry(src).or_insert(next_index);
+            let next_index = compact.len() as NodeId;
+            let dst = *compact.entry(dst).or_insert(next_index);
+
             edge_tx.send((src, dst)).unwrap();
             graph_tx.send((src, dst)).unwrap();
         }
@@ -76,7 +83,7 @@ fn load_graph() -> (EdgeSet, Graph) {
 
     let edge_thread = thread::spawn(move || {
         let _timer = ScopeTimer::with_label("edge thread");
-        let mut edges: HashSet<(usize, usize)> = HashSet::new();
+        let mut edges: HashSet<(NodeId, NodeId)> = HashSet::new();
         while let Ok((src, dst)) = edge_rx.recv() {
             let (src, dst) = (src.min(dst), src.max(dst));
             edges.insert((src, dst));
@@ -86,10 +93,12 @@ fn load_graph() -> (EdgeSet, Graph) {
 
     let graph_thread = thread::spawn(move || {
         let _timer = ScopeTimer::with_label("graph thread");
-        let mut graph: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut graph: Vec<HashSet<NodeId>> = Vec::new();
         while let Ok((src, dst)) = graph_rx.recv() {
-            graph.entry(src).or_default().insert(dst);
-            graph.entry(dst).or_default().insert(src);
+            let size = (src.max(dst) + 1) as usize;
+            (graph.len() < size).then(|| graph.resize(size, HashSet::new()));
+            graph[src as usize].insert(dst);
+            graph[dst as usize].insert(src);
         }
         graph
     });
@@ -116,10 +125,8 @@ fn main() {
         let result: usize = edges
             .par_iter()
             .map(|(src, dst)| {
-                graph
-                    .get(src)
-                    .unwrap()
-                    .intersection(graph.get(dst).unwrap())
+                graph[*src as usize]
+                    .intersection(&graph[*dst as usize])
                     .count()
             })
             .sum();
