@@ -1,13 +1,13 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
+use bitvec::prelude::*;
 use std::fs::File;
 use std::io::prelude::*;
-use std::io::BufReader;
-use std::thread;
 use std::time;
 
-use rayon::iter::IntoParallelRefIterator;
+use bitvec::bitvec;
 use rayon::iter::ParallelIterator;
+use rayon::slice::ParallelSlice;
+use rayon::slice::ParallelSliceMut;
+use rayon::str::ParallelString;
 
 struct ScopeTimer {
     label: String,
@@ -35,104 +35,115 @@ impl Drop for ScopeTimer {
 }
 
 type NodeId = u32;
-type EdgeSet = HashSet<(NodeId, NodeId)>;
-type Graph = Vec<HashSet<NodeId>>;
-
-fn load_graph() -> (EdgeSet, Graph) {
-    let args: Vec<_> = std::env::args().collect();
-    let filename = &args[1];
-    let file = File::open(filename).unwrap();
-    let reader = BufReader::new(file);
-
-    let (reader_tx, reader_rx) = std::sync::mpsc::channel();
-    let (edge_tx, edge_rx) = std::sync::mpsc::channel();
-    let (graph_tx, graph_rx) = std::sync::mpsc::channel();
-
-    let reader_thread = thread::spawn(move || {
-        let _timer = ScopeTimer::with_label("reader thread");
-        for line in reader.lines() {
-            let line = line.unwrap();
-            if line.starts_with('#') {
-                continue;
-            }
-
-            let mut splited = line.split_whitespace();
-            let src: usize = splited.next().unwrap().parse().unwrap();
-            let dst: usize = splited.next().unwrap().parse().unwrap();
-            if src == dst {
-                continue;
-            }
-
-            reader_tx.send((src, dst)).unwrap();
-        }
-    });
-
-    let bridge_thread = thread::spawn(move || {
-        let _timer = ScopeTimer::with_label("bridge thread");
-        let mut compact: HashMap<usize, NodeId> = HashMap::new();
-        while let Ok((src, dst)) = reader_rx.recv() {
-            let next_index = compact.len() as NodeId;
-            let src = *compact.entry(src).or_insert(next_index);
-            let next_index = compact.len() as NodeId;
-            let dst = *compact.entry(dst).or_insert(next_index);
-
-            edge_tx.send((src, dst)).unwrap();
-            graph_tx.send((src, dst)).unwrap();
-        }
-    });
-
-    let edge_thread = thread::spawn(move || {
-        let _timer = ScopeTimer::with_label("edge thread");
-        let mut edges: HashSet<(NodeId, NodeId)> = HashSet::new();
-        while let Ok((src, dst)) = edge_rx.recv() {
-            let (src, dst) = (src.min(dst), src.max(dst));
-            edges.insert((src, dst));
-        }
-        edges
-    });
-
-    let graph_thread = thread::spawn(move || {
-        let _timer = ScopeTimer::with_label("graph thread");
-        let mut graph: Vec<HashSet<NodeId>> = Vec::new();
-        while let Ok((src, dst)) = graph_rx.recv() {
-            let size = (src.max(dst) + 1) as usize;
-            (graph.len() < size).then(|| graph.resize(size, HashSet::new()));
-            graph[src as usize].insert(dst);
-            graph[dst as usize].insert(src);
-        }
-        graph
-    });
-
-    reader_thread.join().unwrap();
-    bridge_thread.join().unwrap();
-    let edges = edge_thread.join().unwrap();
-    let graph = graph_thread.join().unwrap();
-
-    (edges, graph)
-}
 
 fn main() {
     let _timer = ScopeTimer::with_label("totals");
 
-    let (edges, graph) = {
-        let _timer = ScopeTimer::with_label("loading data");
-        let (edges, graph) = load_graph();
-        (edges, graph)
-    };
+    let edges_group_by_src = {
+        let _timer = ScopeTimer::with_label("read and parse");
+        let content = {
+            let _timer = ScopeTimer::with_label("read from file");
+            let args: Vec<_> = std::env::args().collect();
+            let filename = &args[1];
+            let mut file = File::open(filename).unwrap();
+            let mut content = Vec::new();
+            file.read_to_end(&mut content).unwrap();
+            unsafe { String::from_utf8_unchecked(content) }
+        };
 
-    let accumulate = {
-        let _timer = ScopeTimer::with_label("computation");
-        let result: usize = edges
-            .par_iter()
-            .map(|(src, dst)| {
-                graph[*src as usize]
-                    .intersection(&graph[*dst as usize])
-                    .count()
+        let mut edges: Vec<_> = content
+            .par_lines()
+            .filter_map(|line| {
+                if line.starts_with('#') {
+                    return None;
+                }
+                let mut splited = line.split_whitespace();
+                let src: NodeId = splited.next().unwrap().parse().unwrap();
+                let dst: NodeId = splited.next().unwrap().parse().unwrap();
+                if src == dst {
+                    return None;
+                }
+                Some((src.min(dst), src.max(dst)))
             })
-            .sum();
-        result
+            .collect();
+        edges.as_mut_slice().par_sort_unstable();
+        edges.dedup();
+        edges
     };
 
-    let result = accumulate / 3;
+    // let edges_group_by_dst_handle = {
+    //     let mut edges = edges_group_by_src.clone();
+    //     thread::spawn(move || {
+    //         let _timer = ScopeTimer::with_label("sort by dst");
+    //         edges
+    //             .as_mut_slice()
+    //             .par_sort_unstable_by_key(|(src, dst)| (*dst, *src));
+    //         edges
+    //     })
+    // };
+
+    let max_node_id = edges_group_by_src
+        .iter()
+        .map(|(_, bigger)| bigger)
+        .max()
+        .cloned()
+        .map(|x| x as usize)
+        .unwrap();
+
+    let uppers = {
+        let mut uppers: Vec<Vec<NodeId>> = Vec::new();
+        uppers.resize(max_node_id + 1, Vec::default());
+
+        for (src, dst) in edges_group_by_src {
+            uppers[src as usize].push(dst);
+        }
+        uppers
+    };
+
+    // let lowers_handle = thread::spawn(move || {
+    //     let mut lowers: Vec<Vec<NodeId>> = Vec::new();
+    //     lowers.resize(max_node_id + 1, Vec::default());
+
+    //     for (src, dst) in edges_group_by_dst_handle.join().unwrap() {
+    //         lowers[dst as usize].push(src);
+    //     }
+
+    //     lowers
+    // });
+
+    // let uppers = uppers_handle.join().unwrap();
+    // let _lowers = lowers_handle.join().unwrap();
+
+    const TRUNK_SIZE_RATIO: usize = 32;
+
+    let result: usize = uppers
+        .as_slice()
+        .par_chunks(uppers.len() / (TRUNK_SIZE_RATIO * rayon::current_num_threads()))
+        .map(|data| {
+            let mut bitmap = bitvec![];
+            bitmap.resize(max_node_id + 1, false);
+            let mut bitmap = bitmap.into_boxed_bitslice();
+
+            let mut result = 0 as usize;
+            for first in data {
+                for neigh in first {
+                    bitmap.set(*neigh as usize, true);
+                }
+
+                result += first
+                    .iter()
+                    .flat_map(|second| uppers[*second as usize].iter())
+                    .map(|third| bitmap[*third as usize] as usize)
+                    .sum::<usize>();
+
+                for neigh in first {
+                    bitmap.set(*neigh as usize, false);
+                }
+            }
+
+            result
+        })
+        .sum();
+
     println!("{result}");
 }
