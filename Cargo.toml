@@ -1,14 +1,20 @@
+cargo-features = ["profile-rustflags"]
+
 [package]
 name = "triangle-counting-lab"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+atoi_simd = "0.16.0"
 bitvec = "1.0.1"
 memmap2 = "0.9.4"
 rayon = "1.10.0"
 
 [profile.release]
+rustflags = [
+    '-Ctarget-cpu=native'
+]
 codegen-units = 1
 lto = true
 opt-level = 3

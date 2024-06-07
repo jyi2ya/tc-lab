@@ -1,3 +1,5 @@
+#![feature(slice_split_once)]
+
 use bitvec::prelude::*;
 use std::fs::File;
 use std::time;
@@ -20,6 +22,8 @@ impl ScopeTimer {
             start: time::Instant::now(),
         }
     }
+
+    pub fn stop(self) {}
 }
 
 impl Drop for ScopeTimer {
@@ -51,12 +55,13 @@ fn main() {
         let mut edges: Vec<_> = content
             .par_lines()
             .filter_map(|line| {
-                if line.starts_with('#') {
+                let line = line.as_bytes();
+                if line[0] == b'#' {
                     return None;
                 }
-                let mut splited = line.split_whitespace();
-                let src: NodeId = splited.next().unwrap().parse().unwrap();
-                let dst: NodeId = splited.next().unwrap().parse().unwrap();
+                let (src, dst) = line.split_once(|x| x.is_ascii_whitespace()).unwrap();
+                let src: NodeId = atoi_simd::parse(src).unwrap();
+                let dst: NodeId = atoi_simd::parse(dst).unwrap();
                 if src == dst {
                     return None;
                 }
@@ -79,6 +84,8 @@ fn main() {
     //     })
     // };
 
+    let timer_pre_computing = ScopeTimer::with_label("counting neighbors");
+
     let max_node_id = edges_group_by_src
         .iter()
         .map(|(_, bigger)| bigger)
@@ -94,8 +101,11 @@ fn main() {
         for (src, dst) in edges_group_by_src {
             uppers[src as usize].push(dst);
         }
+
         uppers
     };
+
+    timer_pre_computing.stop();
 
     // let lowers_handle = thread::spawn(move || {
     //     let mut lowers: Vec<Vec<NodeId>> = Vec::new();
@@ -113,34 +123,37 @@ fn main() {
 
     const TRUNK_SIZE_RATIO: usize = 32;
 
-    let result: usize = uppers
-        .as_slice()
-        .par_chunks(uppers.len() / (TRUNK_SIZE_RATIO * rayon::current_num_threads()))
-        .map(|data| {
-            let mut bitmap = bitvec![];
-            bitmap.resize(max_node_id + 1, false);
-            let mut bitmap = bitmap.into_boxed_bitslice();
+    let result: usize = {
+        let _timer = ScopeTimer::with_label("computation");
+        uppers
+            .as_slice()
+            .par_chunks(uppers.len() / (TRUNK_SIZE_RATIO * rayon::current_num_threads()))
+            .map(|data| {
+                let mut bitmap = bitvec![];
+                bitmap.resize(max_node_id + 1, false);
+                let mut bitmap = bitmap.into_boxed_bitslice();
 
-            let mut result = 0 as usize;
-            for first in data {
-                for neigh in first {
-                    bitmap.set(*neigh as usize, true);
+                let mut result = 0_usize;
+                for first in data {
+                    for neigh in first {
+                        bitmap.set(*neigh as usize, true);
+                    }
+
+                    result += first
+                        .iter()
+                        .flat_map(|second| uppers[*second as usize].iter())
+                        .map(|third| bitmap[*third as usize] as usize)
+                        .sum::<usize>();
+
+                    for neigh in first {
+                        bitmap.set(*neigh as usize, false);
+                    }
                 }
 
-                result += first
-                    .iter()
-                    .flat_map(|second| uppers[*second as usize].iter())
-                    .map(|third| bitmap[*third as usize] as usize)
-                    .sum::<usize>();
-
-                for neigh in first {
-                    bitmap.set(*neigh as usize, false);
-                }
-            }
-
-            result
-        })
-        .sum();
+                result
+            })
+            .sum()
+    };
 
     println!("{result}");
 }
