@@ -1,6 +1,5 @@
 use bitvec::prelude::*;
 use std::fs::File;
-use std::io::prelude::*;
 use std::time;
 
 use bitvec::bitvec;
@@ -41,15 +40,13 @@ fn main() {
 
     let edges_group_by_src = {
         let _timer = ScopeTimer::with_label("read and parse");
-        let content = {
-            let _timer = ScopeTimer::with_label("read from file");
-            let args: Vec<_> = std::env::args().collect();
-            let filename = &args[1];
-            let mut file = File::open(filename).unwrap();
-            let mut content = Vec::new();
-            file.read_to_end(&mut content).unwrap();
-            unsafe { String::from_utf8_unchecked(content) }
-        };
+
+        let args: Vec<_> = std::env::args().collect();
+        let filename = &args[1];
+        let file = File::open(filename).unwrap();
+        let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
+        let content = &mmap[..];
+        let content = unsafe { std::str::from_utf8_unchecked(content) };
 
         let mut edges: Vec<_> = content
             .par_lines()
