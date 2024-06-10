@@ -4,11 +4,12 @@ use bitvec::prelude::*;
 use smallvec::SmallVec;
 use std::fs::File;
 use std::time;
+use voracious_radix_sort::RadixSort;
+use voracious_radix_sort::Radixable;
 
 use bitvec::bitvec;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
-use rayon::slice::ParallelSliceMut;
 use rayon::str::ParallelString;
 
 struct ScopeTimer {
@@ -41,10 +42,20 @@ impl Drop for ScopeTimer {
 
 type NodeId = u32;
 
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+struct Edge(NodeId, NodeId);
+
+impl Radixable<u64> for Edge {
+    type Key = u64;
+    fn key(&self) -> Self::Key {
+        ((self.0 as u64) << 32) | (self.1 as u64)
+    }
+}
+
 fn main() {
     let _timer = ScopeTimer::with_label("totals");
 
-    let edges_group_by_src = {
+    let edges_group_by_src: Vec<Edge> = {
         let _timer = ScopeTimer::with_label("read and build");
 
         let args: Vec<_> = std::env::args().collect();
@@ -69,7 +80,7 @@ fn main() {
                     if src == dst {
                         return None;
                     }
-                    Some((src.max(dst), src.min(dst)))
+                    Some(Edge(src.max(dst), src.min(dst)))
                 })
                 .collect()
         };
@@ -77,7 +88,7 @@ fn main() {
         let edges = {
             let _timer = ScopeTimer::with_label("sort and dedup");
             let mut edges = edges;
-            edges.as_mut_slice().par_sort_unstable();
+            edges.voracious_mt_sort(rayon::current_num_threads());
             edges.dedup();
             edges
         };
@@ -92,7 +103,7 @@ fn main() {
         let mut lowers: Vec<SmallVec<[NodeId; 16]>> = Vec::new();
         lowers.resize(max_node_id + 1, SmallVec::default());
 
-        for (src, dst) in edges_group_by_src {
+        for Edge(src, dst) in edges_group_by_src {
             lowers[src as usize].push(dst);
         }
 
