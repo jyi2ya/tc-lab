@@ -1,6 +1,7 @@
 #![feature(slice_split_once)]
 
 use bitvec::prelude::*;
+use smallvec::SmallVec;
 use std::fs::File;
 use std::time;
 
@@ -88,14 +89,14 @@ fn main() {
 
     let lowers = {
         let _timer = ScopeTimer::with_label("counting neighbors");
-        let mut lowers: Vec<Vec<NodeId>> = Vec::new();
-        lowers.resize(max_node_id + 1, Vec::default());
+        let mut lowers: Vec<SmallVec<[NodeId; 16]>> = Vec::new();
+        lowers.resize(max_node_id + 1, SmallVec::default());
 
         for (src, dst) in edges_group_by_src {
             lowers[src as usize].push(dst);
         }
 
-        lowers
+        lowers.into_boxed_slice()
     };
 
     const TRUNK_SIZE_RATIO: usize = 32;
@@ -103,7 +104,6 @@ fn main() {
     let result: usize = {
         let _timer = ScopeTimer::with_label("computation");
         lowers
-            .as_slice()
             .par_chunks(lowers.len() / (TRUNK_SIZE_RATIO * rayon::current_num_threads()))
             .map(|data| {
                 let mut bitmap = bitvec![];
