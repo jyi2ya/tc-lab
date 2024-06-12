@@ -190,6 +190,22 @@ fn main() {
         };
 
         let edges = {
+            let _timer = ScopeTimer::with_label("concat");
+            let total_len = edges.iter().map(Vec::len).sum::<usize>();
+            let mut result = Vec::with_capacity(total_len);
+            result.resize(total_len, FatNodeId::default());
+            let mut buf = &mut result[..];
+            rayon::scope(|s| {
+                for item in edges.into_iter() {
+                    let (current, res) = buf.split_at_mut(item.len());
+                    buf = res;
+                    s.spawn(move |_| current.copy_from_slice(item.as_slice()));
+                }
+            });
+            result
+        };
+
+        let edges = {
             let _timer = ScopeTimer::with_label("sort and dedup");
             // let total_len = edges.iter().map(Vec::len).sum::<usize>();
             // let mut aux = Vec::with_capacity(total_len);
@@ -197,7 +213,7 @@ fn main() {
             // let mut result = Vec::with_capacity(total_len);
             // result.resize(total_len, FatNodeId::default());
             // merge(&edges, &mut result, &mut aux, true);
-            let mut result = edges.concat();
+            let mut result = edges;
             result.voracious_mt_sort(rayon::current_num_threads());
             result.dedup();
             result
