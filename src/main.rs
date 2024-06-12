@@ -2,10 +2,10 @@
 
 use bitvec::prelude::*;
 use smallvec::SmallVec;
+use std::cmp::Ordering;
 use std::fs::File;
 use std::time;
 use voracious_radix_sort::RadixSort;
-use voracious_radix_sort::Radixable;
 
 use bitvec::bitvec;
 use rayon::iter::ParallelIterator;
@@ -41,21 +41,27 @@ impl Drop for ScopeTimer {
 }
 
 type NodeId = u32;
+type FatNodeId = u64;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 struct Edge(NodeId, NodeId);
 
-impl Radixable<u64> for Edge {
-    type Key = u64;
-    fn key(&self) -> Self::Key {
-        ((self.0 as u64) << 32) | (self.1 as u64)
+impl From<Edge> for FatNodeId {
+    fn from(value: Edge) -> Self {
+        ((value.0 as FatNodeId) << 32) | (value.1 as FatNodeId)
+    }
+}
+
+impl From<FatNodeId> for Edge {
+    fn from(value: FatNodeId) -> Self {
+        Self((value >> 32) as NodeId, value as NodeId)
     }
 }
 
 fn main() {
     let _timer = ScopeTimer::with_label("totals");
 
-    let edges_group_by_src: Vec<Edge> = {
+    let edges_group_by_src = {
         let _timer = ScopeTimer::with_label("read and build");
 
         let args: Vec<_> = std::env::args().collect();
@@ -69,18 +75,16 @@ fn main() {
             let _timer = ScopeTimer::with_label("scan and parse");
             content
                 .par_lines()
-                .filter_map(|line| {
-                    let line = line.as_bytes();
-                    if line[0] == b'#' {
-                        return None;
+                .map(str::as_bytes)
+                .filter_map(|line| line.split_once(|x| x.is_ascii_whitespace()))
+                .filter_map(|(src, dst)| {
+                    let src: NodeId = atoi_simd::parse(src).ok()?;
+                    let dst: NodeId = atoi_simd::parse(dst).ok()?;
+                    match NodeId::cmp(&src, &dst) {
+                        Ordering::Greater => Some(FatNodeId::from(Edge(src, dst))),
+                        Ordering::Equal => None,
+                        Ordering::Less => Some(FatNodeId::from(Edge(dst, src))),
                     }
-                    let (src, dst) = line.split_once(|x| x.is_ascii_whitespace()).unwrap();
-                    let src: NodeId = atoi_simd::parse(src).unwrap();
-                    let dst: NodeId = atoi_simd::parse(dst).unwrap();
-                    if src == dst {
-                        return None;
-                    }
-                    Some(Edge(src.max(dst), src.min(dst)))
                 })
                 .collect()
         };
@@ -96,14 +100,14 @@ fn main() {
         edges
     };
 
-    let max_node_id = edges_group_by_src.last().unwrap().0 as usize;
+    let max_node_id = edges_group_by_src.last().map(|x| x >> 32).unwrap() as usize;
 
     let lowers = {
         let _timer = ScopeTimer::with_label("counting neighbors");
         let mut lowers: Vec<SmallVec<[NodeId; 16]>> = Vec::new();
         lowers.resize(max_node_id + 1, SmallVec::default());
 
-        for Edge(src, dst) in edges_group_by_src {
+        for Edge(src, dst) in edges_group_by_src.into_iter().map(Edge::from) {
             lowers[src as usize].push(dst);
         }
 
