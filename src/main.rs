@@ -167,7 +167,8 @@ fn main() {
                     content = res;
 
                     s.spawn(|_| {
-                        let mut local = current
+                        let mut local = Vec::with_capacity(partition_size / 20);
+                        let extend = current
                             .split(|&x| x == b'\n')
                             .map(|line| line.strip_suffix(&[b'\r']).unwrap_or(line))
                             .filter_map(|line| line.split_once(|x| x.is_ascii_whitespace()))
@@ -179,9 +180,8 @@ fn main() {
                                     Ordering::Equal => None,
                                     Ordering::Less => Some(FatNodeId::from(Edge(dst, src))),
                                 }
-                            })
-                            .collect::<Vec<_>>();
-                        // local.voracious_sort();
+                            });
+                        local.extend(extend);
                         result.lock().unwrap().push(local);
                     });
                 }
