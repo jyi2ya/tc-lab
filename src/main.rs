@@ -1,14 +1,13 @@
 #![feature(slice_split_once)]
 
 use bitvec::prelude::*;
-use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::fs::File;
 use std::time;
 use voracious_radix_sort::RadixSort;
 
 use bitvec::bitvec;
-use rayon::iter::ParallelIterator;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::slice::ParallelSlice;
 use rayon::str::ParallelString;
 
@@ -47,14 +46,23 @@ type FatNodeId = u64;
 struct Edge(NodeId, NodeId);
 
 impl From<Edge> for FatNodeId {
+    #[inline(always)]
     fn from(value: Edge) -> Self {
         ((value.0 as FatNodeId) << 32) | (value.1 as FatNodeId)
     }
 }
 
 impl From<FatNodeId> for Edge {
+    #[inline(always)]
     fn from(value: FatNodeId) -> Self {
         Self((value >> 32) as NodeId, value as NodeId)
+    }
+}
+
+impl From<&FatNodeId> for Edge {
+    #[inline(always)]
+    fn from(value: &FatNodeId) -> Self {
+        Self::from(*value)
     }
 }
 
@@ -102,13 +110,29 @@ fn main() {
 
     let max_node_id = edges_group_by_src.last().map(|x| x >> 32).unwrap() as usize;
 
+    let (src_list, dst_list): (Vec<_>, Vec<_>) = edges_group_by_src
+        .into_par_iter()
+        .map(|x| {
+            let Edge(src, dst) = Edge::from(x);
+            (src, dst)
+        })
+        .unzip();
+
     let lowers = {
         let _timer = ScopeTimer::with_label("counting neighbors");
-        let mut lowers: Vec<SmallVec<[NodeId; 16]>> = Vec::new();
-        lowers.resize(max_node_id + 1, SmallVec::default());
+        let mut lowers: Vec<&[NodeId]> = Vec::new();
+        lowers.resize_with(max_node_id + 1, Default::default);
 
-        for Edge(src, dst) in edges_group_by_src.into_iter().map(Edge::from) {
-            lowers[src as usize].push(dst);
+        let mut src_list = &src_list[..];
+        let mut dst_list = &dst_list[..];
+
+        while !src_list.is_empty() {
+            let src = src_list[0];
+            let split_pos = src_list.partition_point(|&x| x == src);
+            let (dst_current, dst_res) = dst_list.split_at(split_pos);
+            let (_, src_res) = src_list.split_at(split_pos);
+            lowers[src as usize] = dst_current;
+            (src_list, dst_list) = (src_res, dst_res);
         }
 
         lowers.into_boxed_slice()
@@ -126,7 +150,7 @@ fn main() {
                 let mut bitmap = bitmap.into_boxed_bitslice();
 
                 let mut result = 0_usize;
-                for first in data {
+                for &first in data {
                     for neigh in first {
                         bitmap.set(*neigh as usize, true);
                     }
