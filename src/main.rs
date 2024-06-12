@@ -3,13 +3,13 @@
 use bitvec::prelude::*;
 use std::cmp::Ordering;
 use std::fs::File;
+use std::sync::Mutex;
 use std::time;
 use voracious_radix_sort::RadixSort;
 
 use bitvec::bitvec;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::slice::ParallelSlice;
-use rayon::str::ParallelString;
 
 struct ScopeTimer {
     label: String,
@@ -66,6 +66,74 @@ impl From<&FatNodeId> for Edge {
     }
 }
 
+fn par_merge_helper(a: &[FatNodeId], b: &[FatNodeId], result: &mut [FatNodeId]) {
+    const CUTOFF: usize = 2000;
+    let (small, big) = if a.len() < b.len() { (a, b) } else { (b, a) };
+    if small.is_empty() {
+        result.copy_from_slice(big);
+    } else if small.len() + big.len() <= CUTOFF {
+        itertools::merge(a, b)
+            .zip(result)
+            .for_each(|(src, dst)| *dst = *src);
+    } else {
+        let big_mid = big.len() / 2;
+        let (big_left, big_right) = big.split_at(big_mid);
+        let small_mid = match small.binary_search(&big[big_mid]) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        };
+        let (small_left, small_right) = small.split_at(small_mid);
+        let (result_left, result_right) = result.split_at_mut(big_mid + small_mid);
+        rayon::scope(|s| {
+            s.spawn(|_| par_merge_helper(small_left, big_left, result_left));
+            par_merge_helper(small_right, big_right, result_right);
+        });
+    }
+}
+
+fn merge(
+    elements: &[Vec<FatNodeId>],
+    data: &mut [FatNodeId],
+    aux: &mut [FatNodeId],
+    expect_result_in_data: bool,
+) {
+    match elements.len() {
+        0 => {}
+        1 => {
+            if expect_result_in_data {
+                data.copy_from_slice(&elements[0])
+            } else {
+                aux.copy_from_slice(&elements[0])
+            }
+        }
+        2 => {
+            if expect_result_in_data {
+                par_merge_helper(&elements[0], &elements[1], data);
+            } else {
+                par_merge_helper(&elements[0], &elements[1], aux);
+            }
+        }
+        _ => {
+            let mid = elements.len() / 2;
+            let (left, right) = elements.split_at(mid);
+            let left_len = left.iter().map(Vec::len).sum::<usize>();
+            let (data_left, data_right) = data.split_at_mut(left_len);
+            let (aux_left, aux_right) = aux.split_at_mut(left_len);
+            rayon::scope(|s| {
+                s.spawn(|_| {
+                    merge(left, data_left, aux_left, !expect_result_in_data);
+                });
+                merge(right, data_right, aux_right, !expect_result_in_data);
+            });
+            if expect_result_in_data {
+                par_merge_helper(aux_left, aux_right, data);
+            } else {
+                par_merge_helper(data_left, data_right, aux);
+            }
+        }
+    };
+}
+
 fn main() {
     let _timer = ScopeTimer::with_label("totals");
 
@@ -77,32 +145,62 @@ fn main() {
         let file = File::open(filename).unwrap();
         let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
         let content = &mmap[..];
-        let content = unsafe { std::str::from_utf8_unchecked(content) };
 
         let edges: Vec<_> = {
             let _timer = ScopeTimer::with_label("scan and parse");
-            content
-                .par_lines()
-                .map(str::as_bytes)
-                .filter_map(|line| line.split_once(|x| x.is_ascii_whitespace()))
-                .filter_map(|(src, dst)| {
-                    let src: NodeId = atoi_simd::parse(src).ok()?;
-                    let dst: NodeId = atoi_simd::parse(dst).ok()?;
-                    match NodeId::cmp(&src, &dst) {
-                        Ordering::Greater => Some(FatNodeId::from(Edge(src, dst))),
-                        Ordering::Equal => None,
-                        Ordering::Less => Some(FatNodeId::from(Edge(dst, src))),
-                    }
-                })
-                .collect()
+            let n_threads = rayon::current_num_threads();
+            let partition_size = content.len() / n_threads;
+            let result = Mutex::new(Vec::new());
+            rayon::scope(|s| {
+                let mut content = content;
+                while !content.is_empty() {
+                    let cap = if content.len() < partition_size {
+                        content.len()
+                    } else {
+                        content[partition_size..]
+                            .iter()
+                            .position(|&x| x == b'\n')
+                            .map(|idx| idx + partition_size)
+                            .unwrap_or(content.len())
+                    };
+                    let (current, res) = content.split_at(cap);
+                    content = res;
+
+                    s.spawn(|_| {
+                        let mut local = current
+                            .split(|&x| x == b'\n')
+                            .map(|line| line.strip_suffix(&[b'\r']).unwrap_or(line))
+                            .filter_map(|line| line.split_once(|x| x.is_ascii_whitespace()))
+                            .filter_map(|(src, dst)| {
+                                let src: NodeId = atoi_simd::parse(src).ok()?;
+                                let dst: NodeId = atoi_simd::parse(dst).ok()?;
+                                match NodeId::cmp(&src, &dst) {
+                                    Ordering::Greater => Some(FatNodeId::from(Edge(src, dst))),
+                                    Ordering::Equal => None,
+                                    Ordering::Less => Some(FatNodeId::from(Edge(dst, src))),
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        // local.voracious_sort();
+                        result.lock().unwrap().push(local);
+                    });
+                }
+            });
+            result.into_inner().unwrap()
         };
 
         let edges = {
             let _timer = ScopeTimer::with_label("sort and dedup");
-            let mut edges = edges;
-            edges.voracious_mt_sort(rayon::current_num_threads());
-            edges.dedup();
-            edges
+            // let total_len = edges.iter().map(Vec::len).sum::<usize>();
+            // let mut aux = Vec::with_capacity(total_len);
+            // aux.resize(total_len, FatNodeId::default());
+            // let mut result = Vec::with_capacity(total_len);
+            // result.resize(total_len, FatNodeId::default());
+            // merge(&edges, &mut result, &mut aux, true);
+            let mut result = edges.concat();
+            result.voracious_mt_sort(rayon::current_num_threads());
+            result.dedup();
+            result
         };
 
         edges
