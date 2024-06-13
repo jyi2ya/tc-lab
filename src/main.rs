@@ -66,74 +66,6 @@ impl From<&FatNodeId> for Edge {
     }
 }
 
-fn par_merge_helper(a: &[FatNodeId], b: &[FatNodeId], result: &mut [FatNodeId]) {
-    const CUTOFF: usize = 2000;
-    let (small, big) = if a.len() < b.len() { (a, b) } else { (b, a) };
-    if small.is_empty() {
-        result.copy_from_slice(big);
-    } else if small.len() + big.len() <= CUTOFF {
-        itertools::merge(a, b)
-            .zip(result)
-            .for_each(|(src, dst)| *dst = *src);
-    } else {
-        let big_mid = big.len() / 2;
-        let (big_left, big_right) = big.split_at(big_mid);
-        let small_mid = match small.binary_search(&big[big_mid]) {
-            Ok(pos) => pos,
-            Err(pos) => pos,
-        };
-        let (small_left, small_right) = small.split_at(small_mid);
-        let (result_left, result_right) = result.split_at_mut(big_mid + small_mid);
-        rayon::scope(|s| {
-            s.spawn(|_| par_merge_helper(small_left, big_left, result_left));
-            par_merge_helper(small_right, big_right, result_right);
-        });
-    }
-}
-
-fn merge(
-    elements: &[Vec<FatNodeId>],
-    data: &mut [FatNodeId],
-    aux: &mut [FatNodeId],
-    expect_result_in_data: bool,
-) {
-    match elements.len() {
-        0 => {}
-        1 => {
-            if expect_result_in_data {
-                data.copy_from_slice(&elements[0])
-            } else {
-                aux.copy_from_slice(&elements[0])
-            }
-        }
-        2 => {
-            if expect_result_in_data {
-                par_merge_helper(&elements[0], &elements[1], data);
-            } else {
-                par_merge_helper(&elements[0], &elements[1], aux);
-            }
-        }
-        _ => {
-            let mid = elements.len() / 2;
-            let (left, right) = elements.split_at(mid);
-            let left_len = left.iter().map(Vec::len).sum::<usize>();
-            let (data_left, data_right) = data.split_at_mut(left_len);
-            let (aux_left, aux_right) = aux.split_at_mut(left_len);
-            rayon::scope(|s| {
-                s.spawn(|_| {
-                    merge(left, data_left, aux_left, !expect_result_in_data);
-                });
-                merge(right, data_right, aux_right, !expect_result_in_data);
-            });
-            if expect_result_in_data {
-                par_merge_helper(aux_left, aux_right, data);
-            } else {
-                par_merge_helper(data_left, data_right, aux);
-            }
-        }
-    };
-}
-
 fn main() {
     let _timer = ScopeTimer::with_label("totals");
 
@@ -193,7 +125,7 @@ fn main() {
             let _timer = ScopeTimer::with_label("concat");
             let total_len = edges.iter().map(Vec::len).sum::<usize>();
             let mut result = Vec::with_capacity(total_len);
-            result.resize(total_len, FatNodeId::default());
+            unsafe { result.set_len(total_len) };
             let mut buf = &mut result[..];
             rayon::scope(|s| {
                 for item in edges.into_iter() {
@@ -207,12 +139,6 @@ fn main() {
 
         let edges = {
             let _timer = ScopeTimer::with_label("sort and dedup");
-            // let total_len = edges.iter().map(Vec::len).sum::<usize>();
-            // let mut aux = Vec::with_capacity(total_len);
-            // aux.resize(total_len, FatNodeId::default());
-            // let mut result = Vec::with_capacity(total_len);
-            // result.resize(total_len, FatNodeId::default());
-            // merge(&edges, &mut result, &mut aux, true);
             let mut result = edges;
             result.voracious_mt_sort(rayon::current_num_threads());
             result.dedup();
