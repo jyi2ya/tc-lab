@@ -168,7 +168,12 @@ fn main() {
 
         while !src_list.is_empty() {
             let src = src_list[0];
-            let split_pos = src_list.partition_point(|&x| x == src);
+            let split_pos = src_list
+                .iter()
+                .cloned()
+                .chain(std::iter::once(src + 1))
+                .position(|x| x != src)
+                .unwrap();
             let (dst_current, dst_res) = dst_list.split_at(split_pos);
             let (_, src_res) = src_list.split_at(split_pos);
             lowers[src as usize] = dst_current;
