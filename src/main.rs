@@ -5,11 +5,10 @@ use std::cmp::Ordering;
 use std::fs::File;
 use std::sync::Mutex;
 use std::time;
-use voracious_radix_sort::RadixSort;
 
 use bitvec::bitvec;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use rayon::slice::ParallelSlice;
+use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 struct ScopeTimer {
     label: String,
@@ -66,6 +65,50 @@ impl From<&FatNodeId> for Edge {
     }
 }
 
+fn parallel_merge(result: &mut [u64], mut parts: Vec<&mut [u64]>) -> Option<()> {
+    const CUTOFF: usize = 5000;
+    let total_len = parts.iter().map(|x| x.len()).sum::<usize>();
+    if total_len < CUTOFF || parts.len() == 1 {
+        match parts.len() {
+            0 => {}
+            1 => result.copy_from_slice(&parts[0]),
+            2 => itertools::merge(parts[0].iter(), parts[1].iter())
+                .zip(result)
+                .for_each(|(src, dst)| *dst = *src),
+            _ => itertools::kmerge(parts)
+                .zip(result)
+                .for_each(|(src, dst)| *dst = *src),
+        }
+    } else {
+        parts.sort_by_key(|part| part.len());
+        let position = parts.iter().position(|x| x.len() != 0)?;
+        let (_, parts) = parts.split_at_mut(position);
+        let mid_pos = parts.last()?.len() / 2;
+        let mid_val = parts.last()?[mid_pos];
+        let (left, right): (Vec<_>, Vec<_>) = parts
+            .into_iter()
+            .map(|part| {
+                let split_pos = part
+                    .binary_search_by(|element| match element.cmp(&mid_val) {
+                        Ordering::Equal => Ordering::Greater,
+                        ord => ord,
+                    })
+                    .unwrap_err();
+                part.split_at_mut(split_pos)
+            })
+            .unzip();
+        let left_size = left.iter().map(|x| x.len()).sum::<usize>();
+        let (left_result, right_result) = result.split_at_mut(left_size);
+        rayon::scope(|s| {
+            s.spawn(|_| {
+                parallel_merge(left_result, left);
+            });
+            parallel_merge(right_result, right);
+        });
+    }
+    Some(())
+}
+
 fn main() {
     let _timer = ScopeTimer::with_label("totals");
 
@@ -114,6 +157,7 @@ fn main() {
                                 }
                             });
                         local.extend(extend);
+                        local.as_mut_slice().par_sort_unstable();
                         result.lock().unwrap().push(local);
                     });
                 }
@@ -123,24 +167,23 @@ fn main() {
 
         let edges = {
             let _timer = ScopeTimer::with_label("concat");
-            let total_len = edges.iter().map(Vec::len).sum::<usize>();
+            let mut edges = edges;
+            let sizes = edges.iter().map(Vec::len).collect::<Vec<_>>();
+            let total_len = sizes.iter().sum::<usize>();
             let mut result = Vec::with_capacity(total_len);
             unsafe { result.set_len(total_len) };
-            let mut buf = &mut result[..];
-            rayon::scope(|s| {
-                for item in edges.into_iter() {
-                    let (current, res) = buf.split_at_mut(item.len());
-                    buf = res;
-                    s.spawn(move |_| current.copy_from_slice(item.as_slice()));
-                }
-            });
+            let edges = edges
+                .iter_mut()
+                .map(|x| x.as_mut_slice())
+                .collect::<Vec<_>>();
+            parallel_merge(&mut result, edges);
             result
         };
 
         let edges = {
             let _timer = ScopeTimer::with_label("sort and dedup");
             let mut result = edges;
-            result.voracious_mt_sort(rayon::current_num_threads());
+
             result.dedup();
             result
         };
@@ -150,13 +193,16 @@ fn main() {
 
     let max_node_id = edges_group_by_src.last().map(|x| x >> 32).unwrap() as usize;
 
-    let (src_list, dst_list): (Vec<_>, Vec<_>) = edges_group_by_src
-        .into_par_iter()
-        .map(|x| {
-            let Edge(src, dst) = Edge::from(x);
-            (src, dst)
-        })
-        .unzip();
+    let (src_list, dst_list): (Vec<_>, Vec<_>) = {
+        let _tiemr = ScopeTimer::with_label("unzip");
+        edges_group_by_src
+            .into_par_iter()
+            .map(|x| {
+                let Edge(src, dst) = Edge::from(x);
+                (src, dst)
+            })
+            .unzip()
+    };
 
     let lowers = {
         let _timer = ScopeTimer::with_label("counting neighbors");

@@ -11,7 +11,6 @@ bitvec = "1.0.1"
 itertools = "0.13.0"
 memmap2 = "0.9.4"
 rayon = "1.10.0"
-voracious_radix_sort = { version = "1.2.0", features = ["voracious_multithread"] }
 
 [profile.release]
 lto = true
