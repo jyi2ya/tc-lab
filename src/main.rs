@@ -71,7 +71,7 @@ fn parallel_merge(result: &mut [u64], mut parts: Vec<&mut [u64]>) -> Option<()> 
     if total_len < CUTOFF || parts.len() == 1 {
         match parts.len() {
             0 => {}
-            1 => result.copy_from_slice(&parts[0]),
+            1 => result.copy_from_slice(parts[0]),
             2 => itertools::merge(parts[0].iter(), parts[1].iter())
                 .zip(result)
                 .for_each(|(src, dst)| *dst = *src),
@@ -81,12 +81,12 @@ fn parallel_merge(result: &mut [u64], mut parts: Vec<&mut [u64]>) -> Option<()> 
         }
     } else {
         parts.sort_by_key(|part| part.len());
-        let position = parts.iter().position(|x| x.len() != 0)?;
+        let position = parts.iter().position(|x| !x.is_empty())?;
         let (_, parts) = parts.split_at_mut(position);
         let mid_pos = parts.last()?.len() / 2;
         let mid_val = parts.last()?[mid_pos];
         let (left, right): (Vec<_>, Vec<_>) = parts
-            .into_iter()
+            .iter_mut()
             .map(|part| {
                 let split_pos = part
                     .binary_search_by(|element| match element.cmp(&mid_val) {
@@ -170,25 +170,26 @@ fn main() {
             let mut edges = edges;
             let sizes = edges.iter().map(Vec::len).collect::<Vec<_>>();
             let total_len = sizes.iter().sum::<usize>();
-            let mut result = Vec::with_capacity(total_len);
-            unsafe { result.set_len(total_len) };
             let edges = edges
                 .iter_mut()
                 .map(|x| x.as_mut_slice())
                 .collect::<Vec<_>>();
-            parallel_merge(&mut result, edges);
+
+            let mut result: Vec<FatNodeId> = Vec::with_capacity(total_len);
+            let spare = result.spare_capacity_mut();
+            let spare: &mut [FatNodeId] = unsafe { std::mem::transmute(spare) };
+            parallel_merge(spare, edges);
+            unsafe { result.set_len(total_len) };
             result
         };
 
-        let edges = {
+        {
             let _timer = ScopeTimer::with_label("sort and dedup");
             let mut result = edges;
 
             result.dedup();
             result
-        };
-
-        edges
+        }
     };
 
     let max_node_id = edges_group_by_src.last().map(|x| x >> 32).unwrap() as usize;
@@ -240,24 +241,30 @@ fn main() {
                 bitmap.resize(max_node_id + 1, false);
                 let mut bitmap = bitmap.into_boxed_bitslice();
 
-                let mut result = 0_usize;
-                for &first in data {
-                    for neigh in first {
-                        bitmap.set(*neigh as usize, true);
-                    }
+                data.iter()
+                    .filter_map(|&first| {
+                        let min = first.first()?;
+                        let max = first.last()?;
+                        first.iter().for_each(|&idx| bitmap.set(idx as usize, true));
 
-                    result += first
-                        .iter()
-                        .flat_map(|second| lowers[*second as usize].iter())
-                        .map(|third| bitmap[*third as usize] as usize)
-                        .sum::<usize>();
+                        let result = first
+                            .iter()
+                            .map(|&idx| lowers[idx as usize])
+                            .filter(|&second| match (second.first(), second.last()) {
+                                (Some(first), Some(last)) => first <= max && last >= min,
+                                _ => false,
+                            })
+                            .flatten()
+                            .filter(|&&idx| bitmap[idx as usize])
+                            .count();
 
-                    for neigh in first {
-                        bitmap.set(*neigh as usize, false);
-                    }
-                }
+                        first
+                            .iter()
+                            .for_each(|&idx| bitmap.set(idx as usize, false));
 
-                result
+                        Some(result)
+                    })
+                    .sum::<usize>()
             })
             .sum()
     };
