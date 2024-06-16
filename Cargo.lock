@@ -108,6 +108,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rayon-k-way-merge"
+version = "0.1.0"
+source = "git+https://github.com/jyi2ya/rayon-k-way-merge#f8b9d284340ef0b4b2f1cff3857d040d35d7b084"
+dependencies = [
+ "itertools",
+ "rayon",
+]
+
+[[package]]
 name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -122,6 +131,7 @@ dependencies = [
  "itertools",
  "memmap2",
  "rayon",
+ "rayon-k-way-merge",
 ]
 
 [[package]]

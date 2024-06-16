@@ -65,50 +65,6 @@ impl From<&FatNodeId> for Edge {
     }
 }
 
-fn parallel_merge(result: &mut [u64], mut parts: Vec<&mut [u64]>) -> Option<()> {
-    const CUTOFF: usize = 5000;
-    let total_len = parts.iter().map(|x| x.len()).sum::<usize>();
-    if total_len < CUTOFF || parts.len() == 1 {
-        match parts.len() {
-            0 => {}
-            1 => result.copy_from_slice(parts[0]),
-            2 => itertools::merge(parts[0].iter(), parts[1].iter())
-                .zip(result)
-                .for_each(|(src, dst)| *dst = *src),
-            _ => itertools::kmerge(parts)
-                .zip(result)
-                .for_each(|(src, dst)| *dst = *src),
-        }
-    } else {
-        parts.sort_by_key(|part| part.len());
-        let position = parts.iter().position(|x| !x.is_empty())?;
-        let (_, parts) = parts.split_at_mut(position);
-        let mid_pos = parts.last()?.len() / 2;
-        let mid_val = parts.last()?[mid_pos];
-        let (left, right): (Vec<_>, Vec<_>) = parts
-            .iter_mut()
-            .map(|part| {
-                let split_pos = part
-                    .binary_search_by(|element| match element.cmp(&mid_val) {
-                        Ordering::Equal => Ordering::Greater,
-                        ord => ord,
-                    })
-                    .unwrap_err();
-                part.split_at_mut(split_pos)
-            })
-            .unzip();
-        let left_size = left.iter().map(|x| x.len()).sum::<usize>();
-        let (left_result, right_result) = result.split_at_mut(left_size);
-        rayon::scope(|s| {
-            s.spawn(|_| {
-                parallel_merge(left_result, left);
-            });
-            parallel_merge(right_result, right);
-        });
-    }
-    Some(())
-}
-
 fn main() {
     let _timer = ScopeTimer::with_label("totals");
 
@@ -170,15 +126,12 @@ fn main() {
             let mut edges = edges;
             let sizes = edges.iter().map(Vec::len).collect::<Vec<_>>();
             let total_len = sizes.iter().sum::<usize>();
-            let edges = edges
-                .iter_mut()
-                .map(|x| x.as_mut_slice())
-                .collect::<Vec<_>>();
+            let edges = edges.iter_mut().map(|x| x.as_slice()).collect::<Vec<_>>();
 
             let mut result: Vec<FatNodeId> = Vec::with_capacity(total_len);
             let spare = result.spare_capacity_mut();
             let spare: &mut [FatNodeId] = unsafe { std::mem::transmute(spare) };
-            parallel_merge(spare, edges);
+            rayon_k_way_merge::merge(spare, edges);
             unsafe { result.set_len(total_len) };
             result
         };
