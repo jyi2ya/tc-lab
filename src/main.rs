@@ -66,11 +66,17 @@ impl From<&FatNodeId> for Edge {
 }
 
 fn main() {
-    let chunk_size_ratio = std::env::var("CHUNK_SIZE_RATIO")
+    let compute_chunk_size_ratio = std::env::var("COMPUTE_CHUNK_SIZE_RATIO")
         .ok()
         .and_then(|x| x.parse::<usize>().ok())
-        .unwrap_or(12);
-    println!("chunk size ratio: {chunk_size_ratio}");
+        .unwrap_or(16);
+    println!("compute chunk size ratio: {compute_chunk_size_ratio}");
+
+    let scan_chunk_size_ratio = std::env::var("SCAN_CHUNK_SIZE_RATIO")
+        .ok()
+        .and_then(|x| x.parse::<usize>().ok())
+        .unwrap_or(1);
+    println!("scan chunk size ratio: {scan_chunk_size_ratio}");
 
     let _timer = ScopeTimer::with_label("totals");
 
@@ -85,7 +91,7 @@ fn main() {
 
         let edges: Vec<_> = {
             let _timer = ScopeTimer::with_label("scan and parse");
-            let n_threads = chunk_size_ratio * rayon::current_num_threads();
+            let n_threads = scan_chunk_size_ratio * rayon::current_num_threads();
             let partition_size = content.len() / n_threads;
             let result = Mutex::new(Vec::new());
             rayon::scope(|s| {
@@ -192,7 +198,7 @@ fn main() {
     let result: usize = {
         let _timer = ScopeTimer::with_label("computation");
         lowers
-            .par_chunks(lowers.len() / (chunk_size_ratio * rayon::current_num_threads()))
+            .par_chunks(lowers.len() / (compute_chunk_size_ratio * rayon::current_num_threads()))
             .map(|data| {
                 let mut bitmap = bitvec![];
                 bitmap.resize(max_node_id + 1, false);
