@@ -66,6 +66,12 @@ impl From<&FatNodeId> for Edge {
 }
 
 fn main() {
+    let chunk_size_ratio = std::env::var("CHUNK_SIZE_RATIO")
+        .ok()
+        .and_then(|x| x.parse::<usize>().ok())
+        .unwrap_or(12);
+    println!("chunk size ratio: {chunk_size_ratio}");
+
     let _timer = ScopeTimer::with_label("totals");
 
     let edges_group_by_src = {
@@ -79,7 +85,7 @@ fn main() {
 
         let edges: Vec<_> = {
             let _timer = ScopeTimer::with_label("scan and parse");
-            let n_threads = rayon::current_num_threads();
+            let n_threads = chunk_size_ratio * rayon::current_num_threads();
             let partition_size = content.len() / n_threads;
             let result = Mutex::new(Vec::new());
             rayon::scope(|s| {
@@ -183,12 +189,10 @@ fn main() {
         lowers.into_boxed_slice()
     };
 
-    const TRUNK_SIZE_RATIO: usize = 32;
-
     let result: usize = {
         let _timer = ScopeTimer::with_label("computation");
         lowers
-            .par_chunks(lowers.len() / (TRUNK_SIZE_RATIO * rayon::current_num_threads()))
+            .par_chunks(lowers.len() / (chunk_size_ratio * rayon::current_num_threads()))
             .map(|data| {
                 let mut bitmap = bitvec![];
                 bitmap.resize(max_node_id + 1, false);
