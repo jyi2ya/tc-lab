@@ -32,7 +32,7 @@ impl Drop for ScopeTimer {
     fn drop(&mut self) {
         let end = time::Instant::now();
         println!(
-            "[ScopeTimer] {} seconds | {}",
+            "[ScopeTimer] {:<10.8} seconds | {}",
             (end - self.start).as_secs_f64(),
             self.label,
         );
@@ -66,7 +66,7 @@ impl From<&FatNodeId> for Edge {
     }
 }
 
-fn parallel_build_graph<'a>(
+fn parallel_build_adjacency_list<'a>(
     lowers_offset: usize,
     lowers: &mut [&'a [NodeId]],
     mut src_list: &'a [NodeId],
@@ -79,7 +79,7 @@ fn parallel_build_graph<'a>(
             let split_pos = src_list
                 .iter()
                 .position(|&x| x != src)
-                .unwrap_or_else(|| src_list.len());
+                .unwrap_or(src_list.len());
             let (dst_current, dst_res) = dst_list.split_at(split_pos);
             let (_, src_res) = src_list.split_at(split_pos);
             lowers[src as usize - lowers_offset] = dst_current;
@@ -94,8 +94,8 @@ fn parallel_build_graph<'a>(
         let (src_l, src_r) = src_list.split_at(split_pos);
         let (dst_l, dst_r) = dst_list.split_at(split_pos);
         rayon::join(
-            || parallel_build_graph(lowers_offset, lowers_l, src_l, dst_l),
-            || parallel_build_graph(lowers_split_pos, lowers_r, src_r, dst_r),
+            || parallel_build_adjacency_list(lowers_offset, lowers_l, src_l, dst_l),
+            || parallel_build_adjacency_list(lowers_split_pos, lowers_r, src_r, dst_r),
         );
     }
 }
@@ -116,8 +116,6 @@ fn main() {
     let _timer = ScopeTimer::with_label("totals");
 
     let edges_group_by_src = {
-        let _timer = ScopeTimer::with_label("read and build");
-
         let args: Vec<_> = std::env::args().collect();
         let filename = &args[1];
         let file = File::open(filename).unwrap();
@@ -125,7 +123,7 @@ fn main() {
         let content = &mmap[..];
 
         let edges: Vec<_> = {
-            let _timer = ScopeTimer::with_label("scan and parse");
+            let _timer = ScopeTimer::with_label("scanning and parsing");
             let n_threads = scan_chunk_size_ratio * rayon::current_num_threads();
             let partition_size = content.len() / n_threads;
             let result = Mutex::new(Vec::new());
@@ -169,7 +167,7 @@ fn main() {
         };
 
         let edges = {
-            let _timer = ScopeTimer::with_label("merge");
+            let _timer = ScopeTimer::with_label("merging thread results");
             let mut edges = edges;
             let sizes = edges.iter().map(Vec::len).collect::<Vec<_>>();
             let total_len = sizes.iter().sum::<usize>();
@@ -184,14 +182,17 @@ fn main() {
         };
 
         {
-            let _timer = ScopeTimer::with_label("dedup");
+            let _timer = ScopeTimer::with_label("deduping edge list");
 
             let mut edges = edges;
             let chunk_size = edges.len() / rayon::current_num_threads() + 1;
             let mut parts = edges
                 .par_chunks_mut(chunk_size)
                 .map(|chunk| chunk.partition_dedup().0)
-                .map(|x| &x[..])
+                .map(|x| {
+                    #[allow(clippy::redundant_slicing)]
+                    &x[..]
+                })
                 .collect::<Vec<_>>();
 
             let mut previous = parts[0].last().unwrap();
@@ -218,7 +219,7 @@ fn main() {
     let max_node_id = edges_group_by_src.last().map(|x| x >> 32).unwrap() as usize;
 
     let (src_list, dst_list): (Vec<_>, Vec<_>) = {
-        let _tiemr = ScopeTimer::with_label("unzip");
+        let _tiemr = ScopeTimer::with_label("adjusting memory layout");
         edges_group_by_src
             .into_par_iter()
             .map(|x| {
@@ -229,10 +230,10 @@ fn main() {
     };
 
     let lowers = {
-        let _timer = ScopeTimer::with_label("counting neighbors");
+        let _timer = ScopeTimer::with_label("building adjacency list");
         let mut lowers: Vec<&[NodeId]> = Vec::new();
         lowers.resize_with(max_node_id + 1, Default::default);
-        parallel_build_graph(0, lowers.as_mut_slice(), &src_list[..], &dst_list[..]);
+        parallel_build_adjacency_list(0, lowers.as_mut_slice(), &src_list[..], &dst_list[..]);
         lowers.into_boxed_slice()
     };
 
