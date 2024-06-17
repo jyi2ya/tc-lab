@@ -66,6 +66,40 @@ impl From<&FatNodeId> for Edge {
     }
 }
 
+fn parallel_build_graph<'a>(
+    lowers_offset: usize,
+    lowers: &mut [&'a [NodeId]],
+    mut src_list: &'a [NodeId],
+    mut dst_list: &'a [NodeId],
+) {
+    const CUTOFF: usize = 5000 * 16;
+    if src_list.len() < CUTOFF {
+        while !src_list.is_empty() {
+            let src = src_list[0];
+            let split_pos = src_list
+                .iter()
+                .position(|&x| x != src)
+                .unwrap_or_else(|| src_list.len());
+            let (dst_current, dst_res) = dst_list.split_at(split_pos);
+            let (_, src_res) = src_list.split_at(split_pos);
+            lowers[src as usize - lowers_offset] = dst_current;
+            (src_list, dst_list) = (src_res, dst_res);
+        }
+    } else {
+        let mid = src_list.len() / 2;
+        let mid_val = src_list[mid];
+        let split_pos = src_list.partition_point(|&x| x < mid_val);
+        let lowers_split_pos = mid_val as usize;
+        let (lowers_l, lowers_r) = lowers.split_at_mut(lowers_split_pos - lowers_offset);
+        let (src_l, src_r) = src_list.split_at(split_pos);
+        let (dst_l, dst_r) = dst_list.split_at(split_pos);
+        rayon::join(
+            || parallel_build_graph(lowers_offset, lowers_l, src_l, dst_l),
+            || parallel_build_graph(lowers_split_pos, lowers_r, src_r, dst_r),
+        );
+    }
+}
+
 fn main() {
     let compute_chunk_size_ratio = std::env::var("COMPUTE_CHUNK_SIZE_RATIO")
         .ok()
@@ -198,24 +232,7 @@ fn main() {
         let _timer = ScopeTimer::with_label("counting neighbors");
         let mut lowers: Vec<&[NodeId]> = Vec::new();
         lowers.resize_with(max_node_id + 1, Default::default);
-
-        let mut src_list = &src_list[..];
-        let mut dst_list = &dst_list[..];
-
-        while !src_list.is_empty() {
-            let src = src_list[0];
-            let split_pos = src_list
-                .iter()
-                .cloned()
-                .chain(std::iter::once(src + 1))
-                .position(|x| x != src)
-                .unwrap();
-            let (dst_current, dst_res) = dst_list.split_at(split_pos);
-            let (_, src_res) = src_list.split_at(split_pos);
-            lowers[src as usize] = dst_current;
-            (src_list, dst_list) = (src_res, dst_res);
-        }
-
+        parallel_build_graph(0, lowers.as_mut_slice(), &src_list[..], &dst_list[..]);
         lowers.into_boxed_slice()
     };
 
