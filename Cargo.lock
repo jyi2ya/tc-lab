@@ -110,7 +110,7 @@ dependencies = [
 [[package]]
 name = "rayon-k-way-merge"
 version = "0.1.0"
-source = "git+https://github.com/jyi2ya/rayon-k-way-merge#f8b9d284340ef0b4b2f1cff3857d040d35d7b084"
+source = "git+https://github.com/jyi2ya/rayon-k-way-merge#efeee49aa01a165e185d9a26b902b9c6786cf0b5"
 dependencies = [
  "itertools",
  "rayon",

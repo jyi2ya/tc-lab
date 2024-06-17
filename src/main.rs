@@ -1,4 +1,5 @@
 #![feature(slice_split_once)]
+#![feature(slice_partition_dedup)]
 
 use bitvec::prelude::*;
 use std::cmp::Ordering;
@@ -134,7 +135,7 @@ fn main() {
         };
 
         let edges = {
-            let _timer = ScopeTimer::with_label("concat");
+            let _timer = ScopeTimer::with_label("merge");
             let mut edges = edges;
             let sizes = edges.iter().map(Vec::len).collect::<Vec<_>>();
             let total_len = sizes.iter().sum::<usize>();
@@ -149,10 +150,33 @@ fn main() {
         };
 
         {
-            let _timer = ScopeTimer::with_label("sort and dedup");
-            let mut result = edges;
+            let _timer = ScopeTimer::with_label("dedup");
 
-            result.dedup();
+            let mut edges = edges;
+            let chunk_size = edges.len() / rayon::current_num_threads() + 1;
+            let mut parts = edges
+                .par_chunks_mut(chunk_size)
+                .map(|chunk| chunk.partition_dedup().0)
+                .map(|x| &x[..])
+                .collect::<Vec<_>>();
+
+            let mut previous = parts[0].last().unwrap();
+            for part in &mut parts[1..] {
+                if let Some(pos) = part.iter().position(|x| x != previous) {
+                    let (_, current) = part.split_at(pos);
+                    *part = current;
+                    previous = current.last().unwrap();
+                } else {
+                    *part = &mut [];
+                }
+            }
+            let total_len = parts.iter().map(|x| x.len()).sum::<usize>();
+
+            let mut result: Vec<FatNodeId> = Vec::with_capacity(total_len);
+            let spare = result.spare_capacity_mut();
+            let spare: &mut [FatNodeId] = unsafe { std::mem::transmute(spare) };
+            rayon_k_way_merge::merge(spare, parts);
+            unsafe { result.set_len(total_len) };
             result
         }
     };
