@@ -1,15 +1,83 @@
+#![feature(stdarch_x86_avx512)]
 #![feature(slice_split_once)]
 #![feature(slice_partition_dedup)]
 
-use bitvec::prelude::*;
+use std::arch::x86_64::*;
 use std::cmp::Ordering;
 use std::fs::File;
 use std::sync::Mutex;
 use std::time;
 
-use bitvec::bitvec;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
+
+struct Avx512Bitmap {
+    data: Vec<u32>,
+}
+
+impl std::fmt::Debug for Avx512Bitmap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for i in &self.data {
+            writeln!(f, "{:032b} ", i)?;
+        }
+        writeln!(f, "\n")
+    }
+}
+
+impl Avx512Bitmap {
+    #[inline]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            data: vec![0; capacity],
+        }
+    }
+
+    #[inline]
+    fn batch_flip(&mut self, idx: &[u32]) {
+        idx.iter()
+            .map(|dest| (dest >> 5, dest & 0x1F))
+            .for_each(|(idx, offset)| self.data[idx as usize] ^= 1_u32 << offset);
+    }
+
+    #[inline]
+    fn batch_count(&self, idx: &[u32]) -> u32 {
+        idx.chunks(16)
+            .map(|chunk| unsafe {
+                let mem = chunk.as_ptr() as *const i32;
+                let bits = match chunk.len() {
+                    16 => {
+                        let target = _mm512_loadu_epi32(mem);
+
+                        let idx = _mm512_srli_epi32(target, 5);
+                        let offset = _mm512_and_si512(target, _mm512_set1_epi32(0x1F));
+
+                        let buf = _mm512_i32gather_epi32::<4>(idx, self.data.as_ptr() as *const u8);
+                        let mask = _mm512_sllv_epi32(_mm512_set1_epi32(1), offset);
+                        _mm512_and_si512(buf, mask)
+                    }
+                    _ => {
+                        let trunc_mask = ((1 << chunk.len()) - 1) as u16;
+                        let target = _mm512_maskz_loadu_epi32(trunc_mask, mem);
+
+                        let idx = _mm512_srli_epi32(target, 5);
+                        let offset = _mm512_and_si512(target, _mm512_set1_epi32(0x1F));
+
+                        let buf = _mm512_mask_i32gather_epi32::<4>(
+                            _mm512_set1_epi32(0),
+                            trunc_mask,
+                            idx,
+                            self.data.as_ptr() as *const u8,
+                        );
+                        let mask = _mm512_sllv_epi32(_mm512_set1_epi32(1), offset);
+                        _mm512_and_si512(buf, mask)
+                    }
+                };
+                let count = _mm512_cmpneq_epi32_mask(bits, _mm512_set1_epi32(0));
+                count.count_ones()
+            })
+            .sum::<u32>()
+    }
+}
 
 struct ScopeTimer {
     label: String,
@@ -104,13 +172,13 @@ fn main() {
     let compute_chunk_size_ratio = std::env::var("COMPUTE_CHUNK_SIZE_RATIO")
         .ok()
         .and_then(|x| x.parse::<usize>().ok())
-        .unwrap_or(16);
+        .unwrap_or(8);
     println!("compute chunk size ratio: {compute_chunk_size_ratio}");
 
     let scan_chunk_size_ratio = std::env::var("SCAN_CHUNK_SIZE_RATIO")
         .ok()
         .and_then(|x| x.parse::<usize>().ok())
-        .unwrap_or(1);
+        .unwrap_or(2);
     println!("scan chunk size ratio: {scan_chunk_size_ratio}");
 
     let _timer = ScopeTimer::with_label("totals");
@@ -242,15 +310,13 @@ fn main() {
         lowers
             .par_chunks(lowers.len() / (compute_chunk_size_ratio * rayon::current_num_threads()))
             .map(|data| {
-                let mut bitmap = bitvec![];
-                bitmap.resize(max_node_id + 1, false);
-                let mut bitmap = bitmap.into_boxed_bitslice();
+                let mut bitmap = Avx512Bitmap::with_capacity(max_node_id + 1);
 
                 data.iter()
                     .filter_map(|&first| {
                         let min = first.first()?;
                         let max = first.last()?;
-                        first.iter().for_each(|&idx| bitmap.set(idx as usize, true));
+                        bitmap.batch_flip(first);
 
                         let result = first
                             .iter()
@@ -259,13 +325,10 @@ fn main() {
                                 (Some(first), Some(last)) => first <= max && last >= min,
                                 _ => false,
                             })
-                            .flatten()
-                            .filter(|&&idx| bitmap[idx as usize])
-                            .count();
+                            .map(|idx| bitmap.batch_count(idx) as usize)
+                            .sum::<usize>();
 
-                        first
-                            .iter()
-                            .for_each(|&idx| bitmap.set(idx as usize, false));
+                        bitmap.batch_flip(first);
 
                         Some(result)
                     })
