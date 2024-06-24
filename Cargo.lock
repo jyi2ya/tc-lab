@@ -3,12 +3,6 @@
 version = 3
 
 [[package]]
-name = "atoi_simd"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4790f9e8961209112beb783d85449b508673cf4a6a419c8449b210743ac4dbe9"
-
-[[package]]
 name = "crossbeam-deque"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -96,7 +90,6 @@ dependencies = [
 name = "triangle-counting-lab"
 version = "0.1.0"
 dependencies = [
- "atoi_simd",
  "memmap2",
  "rayon",
  "rayon-k-way-merge",

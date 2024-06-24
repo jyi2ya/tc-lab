@@ -6,7 +6,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-atoi_simd = "0.16.0"
 memmap2 = "0.9.4"
 rayon = "1.10.0"
 rayon-k-way-merge = { git = "https://github.com/jyi2ya/rayon-k-way-merge", version = "0.1.0" }

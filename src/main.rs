@@ -11,6 +11,111 @@ use std::time;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
+fn simd_parse_u32(input: &[u8]) -> u32 {
+    unsafe {
+        let len = input.len();
+        let mem = input.as_ptr() as *const i8;
+        let trunc_mask = ((1_u64 << len) - 1) as u16;
+        let data = _mm_maskz_loadu_epi8(trunc_mask, mem);
+        let sub = _mm_set1_epi8(b'0' as i8);
+        let data = _mm_maskz_sub_epi8(trunc_mask, data, sub);
+        let data = match len {
+            0 => _mm_bslli_si128::<16>(data),
+            1 => _mm_bslli_si128::<15>(data),
+            2 => _mm_bslli_si128::<14>(data),
+            3 => _mm_bslli_si128::<13>(data),
+            4 => _mm_bslli_si128::<12>(data),
+            5 => _mm_bslli_si128::<11>(data),
+            6 => _mm_bslli_si128::<10>(data),
+            7 => _mm_bslli_si128::<9>(data),
+            8 => _mm_bslli_si128::<8>(data),
+            9 => _mm_bslli_si128::<7>(data),
+            10 => _mm_bslli_si128::<6>(data),
+            11 => _mm_bslli_si128::<5>(data),
+            12 => _mm_bslli_si128::<4>(data),
+            13 => _mm_bslli_si128::<3>(data),
+            14 => _mm_bslli_si128::<2>(data),
+            15 => _mm_bslli_si128::<1>(data),
+            16 => _mm_bslli_si128::<0>(data),
+            _ => unreachable!(),
+        };
+        let data = _mm512_cvtepi8_epi32(data);
+        let weigh = _mm512_set_epi32(
+            1,
+            10,
+            100,
+            1_000,
+            10_000,
+            100_000,
+            1000_000,
+            10_000_000,
+            100_000_000,
+            1000_000_000,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+        let result = _mm512_mullo_epi32(data, weigh);
+        _mm512_reduce_add_epi32(result) as u32
+    }
+}
+
+struct Avx512Lines<'a> {
+    res: &'a [u8],
+}
+
+impl<'a> From<&'a [u8]> for Avx512Lines<'a> {
+    fn from(res: &'a [u8]) -> Self {
+        Self { res }
+    }
+}
+
+impl<'a> Iterator for Avx512Lines<'a> {
+    type Item = Option<(&'a [u8], &'a [u8])>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.res.is_empty() {
+            return None;
+        }
+        unsafe {
+            let mem = self.res.as_ptr() as *const i32;
+            let data = if self.res.len() >= 64 {
+                _mm512_loadu_epi32(mem)
+            } else {
+                let trunc_mask = ((1_usize << self.res.len()) - 1) as u16;
+                _mm512_maskz_loadu_epi32(trunc_mask, mem)
+            };
+            let endl_pos = _mm512_cmpeq_epi8_mask(data, _mm512_set1_epi8(b'\n' as i8))
+                .trailing_zeros() as usize;
+            if endl_pos == 64 {
+                self.res = &self.res[std::cmp::min(endl_pos, self.res.len())..];
+                Some(None)
+            } else {
+                let line = &self.res[..endl_pos];
+                let line = line.strip_suffix(&[b'\r']).unwrap_or(line);
+                let tab_pos = _mm512_cmpeq_epi8_mask(data, _mm512_set1_epi8(b'\t' as i8))
+                    .trailing_zeros() as usize;
+                let result = if tab_pos + 1 <= line.len() {
+                    let (src, dst) = (&line[..tab_pos], &line[tab_pos + 1..]);
+                    if src[0].is_ascii_digit() && dst[0].is_ascii_digit() {
+                        Some((src, dst))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                self.res = &self.res[std::cmp::min(endl_pos + 1, self.res.len())..];
+                Some(result)
+            }
+        }
+    }
+}
+
 struct Avx512Bitmap {
     data: Vec<u32>,
 }
@@ -212,18 +317,13 @@ fn main() {
 
                     s.spawn(|_| {
                         let mut local = Vec::with_capacity(partition_size / 20);
-                        let extend = current
-                            .split(|&x| x == b'\n')
-                            .map(|line| line.strip_suffix(&[b'\r']).unwrap_or(line))
-                            .filter_map(|line| line.split_once(|x| x.is_ascii_whitespace()))
-                            .filter_map(|(src, dst)| {
-                                let src: NodeId = atoi_simd::parse(src).ok()?;
-                                let dst: NodeId = atoi_simd::parse(dst).ok()?;
-                                match NodeId::cmp(&src, &dst) {
-                                    Ordering::Greater => Some(FatNodeId::from(Edge(src, dst))),
-                                    Ordering::Equal => None,
-                                    Ordering::Less => Some(FatNodeId::from(Edge(dst, src))),
-                                }
+                        let extend = Avx512Lines::from(&current[..])
+                            .flatten()
+                            .map(|(src, dst)| (simd_parse_u32(src), simd_parse_u32(dst)))
+                            .filter_map(|(src, dst)| match NodeId::cmp(&src, &dst) {
+                                Ordering::Greater => Some(FatNodeId::from(Edge(src, dst))),
+                                Ordering::Equal => None,
+                                Ordering::Less => Some(FatNodeId::from(Edge(dst, src))),
                             });
                         local.extend(extend);
                         local.as_mut_slice().par_sort_unstable();
